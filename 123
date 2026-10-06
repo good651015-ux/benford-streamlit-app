@@ -1,0 +1,136 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from scipy.stats import chisquare
+
+# 1. 頁面配置
+st.set_page_config(page_title="Benford's Law 檢驗分析", layout="wide")
+st.title("📊 班福德法則 (Benford's Law) 數據分析工具")
+
+st.markdown("""
+**班福德法則** 指出，在自然發生的數據集中，首位數字為 **1** 的機率約為 **30.1%**，而為 **9** 的機率僅約 **4.6%**。
+常用於 **財務審計、法醫會計（檢查帳務造假）與選舉數據異常檢測**。
+""")
+
+# 2. 理論機率計算
+digits = np.arange(1, 10)
+benford_probs = np.log10(1 + 1 / digits)
+benford_pcts = benford_probs * 100
+
+# 3. 側邊欄：資料來源選擇
+st.sidebar.header("⚙️ 資料設定")
+data_source = st.sidebar.radio(
+    "選擇資料來源",
+    ["模擬數據 (指數增長 - 符合)", "模擬數據 (均勻分布 - 不符合)", "模擬數據 (人為造假 - 異常)", "自訂上傳 CSV"]
+)
+
+data_series = None
+
+if "模擬數據" in data_source:
+    sample_size = st.sidebar.slider("樣本數量", 500, 10000, 2000, step=500)
+    
+    if "指數增長" in data_source:
+        # 指數成長數據符合 Benford's Law
+        raw_data = np.exp(np.random.normal(5, 2, sample_size)) * 100
+    elif "均勻分布" in data_source:
+        # 均勻分布數據不符合
+        raw_data = np.random.uniform(10, 9999, sample_size)
+    else:
+        # 模擬人為造假 (人為偏好數字 5, 7, 8)
+        benford_data = np.exp(np.random.normal(5, 2, int(sample_size * 0.6))) * 100
+        fake_data = np.random.uniform(500, 899, int(sample_size * 0.4))
+        raw_data = np.concatenate([benford_data, fake_data])
+        
+    data_series = pd.Series(raw_data)
+
+else:
+    uploaded_file = st.sidebar.file_uploader("上傳 CSV 檔案", type=["csv"])
+    if uploaded_file is not None:
+        df = pd.read_csv(uploaded_file)
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        if numeric_cols:
+            selected_col = st.sidebar.selectbox("選擇分析欄位", numeric_cols)
+            data_series = df[selected_col].dropna()
+        else:
+            st.error("上傳的 CSV 中未找到數值欄位！")
+
+# 4. 資料處理與分析
+if data_series is not None and len(data_series) > 0:
+    # 提取首位數字 (取絕對值、轉字串、拿掉 0 與小數點)
+    cleaned_str = data_series.abs().astype(str).str.replace(r'[^1-9]', '', regex=True)
+    first_digits = cleaned_str.str[0].dropna()
+    first_digits = first_digits[first_digits.isin([str(d) for d in digits])].astype(int)
+
+    total_count = len(first_digits)
+
+    if total_count == 0:
+        st.warning("無法從選定資料中提取有效的首位數字 (1-9)。")
+    else:
+        # 計算觀察頻率與百分比
+        counts = first_digits.value_counts().reindex(digits, fill_value=0)
+        obs_pcts = (counts / total_count) * 100
+        expected_counts = benford_probs * total_count
+
+        # 卡方檢定 (Chi-Square Test)
+        chi2_stat, p_value = chisquare(counts, f_exp=expected_counts)
+
+        # 5. UI 版面配置：指標顯示
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("有效樣本總數", f"{total_count:,}")
+        col2.metric("首位數字 '1' 比例", f"{obs_pcts[1]:.1f}%", f"{obs_pcts[1]-30.1:+.1f}% vs 理論")
+        col3.metric("卡方檢定量 (Chi2)", f"{chi2_stat:.2f}")
+        col4.metric("P-value", f"{p_value:.4f}", "顯著偏離" if p_value < 0.05 else "符合預期")
+
+        # 6. 畫圖：Plotly 互動柱狀圖 + 折線圖
+        st.subheader("📈 觀察值 vs 班福德法則理論分布")
+        
+        fig = go.Figure()
+
+        # 實際數據柱狀圖
+        fig.add_trace(go.Bar(
+            x=digits,
+            y=obs_pcts,
+            name="實際數據 (%)",
+            marker_color="teal",
+            opacity=0.7
+        ))
+
+        # 班福德理論折線圖
+        fig.add_trace(go.Scatter(
+            x=digits,
+            y=benford_pcts,
+            mode="lines+markers",
+            name="Benford 理論 (%)",
+            line=dict(color="crimson", width=3, dash="dash"),
+            marker=dict(size=8)
+        ))
+
+        fig.update_layout(
+            xaxis=dict(tickmode="array", tickvals=list(digits), title="首位數字 (Leading Digit)"),
+            yaxis=dict(title="出現比例 (%)"),
+            hovermode="x unified",
+            height=450,
+            margin=dict(l=20, r=20, t=30, b=20)
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        # 7. 數據詳細表格
+        st.subheader("📋 數據明細比較")
+        comparison_df = pd.DataFrame({
+            "首位數字": digits,
+            "觀察次數": counts.values,
+            "實際比例 (%)": obs_pcts.values.round(2),
+            "理論比例 (%)": benford_pcts.round(2),
+            "差異 (%)": (obs_pcts.values - benford_pcts).round(2)
+        })
+        st.dataframe(comparison_df.set_index("首位數字"), use_container_width=True)
+
+        # 結論輔助說明
+        if p_value < 0.05:
+            st.error("⚠️ **檢定結果**：數據顯著偏離班福德法則 ($p < 0.05$)。若此數據為財務報表或交易紀錄，建議進行進一步稽核。")
+        else:
+            st.success("✅ **檢定結果**：數據符合班福德法則 ($p \ge 0.05$)，未發現異常分布。")
+else:
+    st.info("請在側邊欄選擇模擬數據或上傳 CSV 檔案開始分析。")
